@@ -1,0 +1,25 @@
+// code to flash onto a Spark Core device
+// www.spark.io
+
+int motionSensor = 0;
+int led = 7;
+int lastMotion = 0;
+
+void setup() {
+   pinMode(led, OUTPUT);
+   pinMode(motionSensor,INPUT);
+   Spark.variable("lastMotion", &lastMotion, INT);
+}
+
+void loop() {
+   if (digitalRead(motionSensor) == HIGH) {
+       digitalWrite(led,HIGH);
+       lastMotion = 0;
+   } else {
+      digitalWrite(led,LOW);
+      if (lastMotion < 3600) {
+         lastMotion++;
+      }
+   }
+   delay(1000);
+}
