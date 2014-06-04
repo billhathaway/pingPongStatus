@@ -1,24 +1,31 @@
-// code to flash onto a Spark Core device
-// www.spark.io
-
 int motionSensor = 0;
 int led = 7;
-int lastMotion = 0;
+int freeCount = 0;
+bool previousBusy = false;
 
 void setup() {
    pinMode(led, OUTPUT);
    pinMode(motionSensor,INPUT);
-   Spark.variable("lastMotion", &lastMotion, INT);
+   Spark.publish("sensor starting");
 }
 
 void loop() {
    if (digitalRead(motionSensor) == HIGH) {
        digitalWrite(led,HIGH);
-       lastMotion = 0;
+       if (previousBusy == false) {
+            Spark.publish("tableStatus","busy");
+       }
+       freeCount=0;
+       previousBusy=true;
    } else {
       digitalWrite(led,LOW);
-      if (lastMotion < 3600) {
-         lastMotion++;
+      previousBusy=false;
+      if (freeCount == 60) { 
+          // only report table is free when no activity has been detected for a minute
+          Spark.publish("tableStatus","free");
+          freeCount=0;
+      } else {
+          freeCount++;
       }
    }
    delay(1000);

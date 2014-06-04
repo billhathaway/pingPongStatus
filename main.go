@@ -2,12 +2,16 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
+	"strings"
+	"time"
 )
 
 var (
@@ -15,59 +19,92 @@ var (
 	verbose = false
 	urlFile = "url.txt"
 	url     = ""
+	status  tableStatus
 )
 
-type sparkResponse struct {
-	Error            string `json:"error"`
-	ErrorDescription string `json:"error_description"`
-	Info             string `json:"info"`
-	Command          string `json:"cmd"`
-	Name             string `json:"name"`
-	Result           int    `json:"result"`
-	CoreInfo         struct {
-		LastHandshake string `json:"last_handshake_at"`
-		Connected     bool   `json:"connected"`
-	}
+type sparkEvent struct {
+	Data        string `json:"data"`
+	Ttl         string `json:"ttl"`
+	PublishedAt string `json:"publised_at"`
+	Coreid      string `json:"coreid"`
 }
 
-func querySparkAPI(w http.ResponseWriter, r *http.Request) {
+type tableStatus struct {
+	available   bool
+	lastUpdated time.Time
+}
 
-	webResponse, err := http.Get(url)
-	if err != nil {
-		fmt.Fprintf(w, "Problem contacting spark API\n%s\n", err.Error())
-		return
+func (t tableStatus) String() string {
+	return fmt.Sprintf("available=%v lastUpdated=%s", t.available, t.lastUpdated.Format(time.RFC3339))
+}
+
+// fetch events forever, updating status
+func fetchEvents(url string) {
+	for {
+		response, err := http.Get(url)
+		if err != nil {
+			log.Printf("event=api_call status=error message=%q\n", err.Error())
+			time.Sleep(time.Minute)
+			continue
+		}
+		var buf bytes.Buffer
+		event := sparkEvent{}
+		receivedTableStatus := false
+		buffed := bufio.NewReader(response.Body)
+		for {
+			line, err := buffed.ReadBytes('\n')
+			switch {
+			// ignore lines starting with colon per spec
+			case bytes.HasPrefix(line, []byte(":")):
+			// skip per spec
+			case bytes.HasPrefix(line, []byte("event:")):
+				if string(line[7:]) == "tableStatus\n" {
+					receivedTableStatus = true
+				} else {
+					log.Printf("Skipping event %s", line)
+				}
+			case bytes.HasPrefix(line, []byte("data:")):
+				if receivedTableStatus {
+					buf.Write(line[6:])
+				}
+			case len(line) == 1:
+				if receivedTableStatus {
+					receivedTableStatus = false
+					err = json.Unmarshal(buf.Bytes(), &event)
+					if err != nil {
+						log.Printf("event=unmarshall_json status=error message=%q data=%s\n", err.Error(), buf.String())
+						buf.Reset()
+						continue
+					}
+					buf.Reset()
+					status.available = event.Data == "free"
+					status.lastUpdated = time.Now()
+					log.Println(status)
+				}
+			default:
+				log.Printf("Unknown line received: %s\n", line)
+				break
+			}
+		}
+		response.Body.Close()
 	}
 
-	body, err := ioutil.ReadAll(webResponse.Body)
-	if err != nil {
-		fmt.Fprintf(w, "Problem reading response\n%s\n", err.Error())
-		return
-	}
+}
 
-	response := sparkResponse{}
-	err = json.Unmarshal(body, &response)
-	if verbose {
-		log.Printf("%#v", response)
-	}
+func showStatus(w http.ResponseWriter, r *http.Request) {
 
-	if err != nil {
-		fmt.Fprintf(w, "Problem unmarshalling json\n%s\n", err.Error())
-		return
+	info := "Busy"
+	color := "red"
+	if status.available {
+		color = "green"
+		info = "Available"
 	}
+	fmt.Fprintf(w, `<html><head><title>%s</title><meta http-equiv="refresh" content="60"></head><body><p style="font-family:arial;color:%s;font-size:120px">%s</p>Last updated %s</body></html>`, info, color, info, status.lastUpdated.Format(time.RFC1123))
 
-	if response.Error != "" {
-		fmt.Fprintf(w, "Problem with response\n%+v\n", response)
-		return
-	}
+}
 
-	status := "Available"
-	color := "green"
-	if response.Result < 30 {
-		status = "Busy"
-		color = "red"
-	}
+func blackHole(w http.ResponseWriter, r *http.Request) {
 
-	fmt.Fprintf(w, `<html><head><title>%s</title><meta http-equiv="refresh" content="30"></head><body><p style="font-family:arial;color:%s;font-size:120px">%s</p></body></html>`, status, color, status)
 }
 
 func main() {
@@ -81,9 +118,12 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		url = string(data)
+		url = strings.TrimSpace(string(data))
+
 	}
-	http.HandleFunc("/", querySparkAPI)
+	go fetchEvents(url)
+	http.HandleFunc("/", showStatus)
+	http.HandleFunc("/favicon.ico", blackHole)
 	err := http.ListenAndServe(":"+port, nil)
 	log.Fatal(err)
 }
