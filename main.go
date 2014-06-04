@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -79,7 +80,7 @@ func fetchEvents(url string) {
 					buf.Reset()
 					status.available = event.Data == "free"
 					status.lastUpdated = time.Now()
-					log.Println(status)
+					//log.Println(status)
 				}
 			default:
 				log.Printf("Unknown line received: %s\n", line)
@@ -92,7 +93,6 @@ func fetchEvents(url string) {
 }
 
 func showStatus(w http.ResponseWriter, r *http.Request) {
-
 	info := "Busy"
 	color := "red"
 	if status.available {
@@ -100,6 +100,9 @@ func showStatus(w http.ResponseWriter, r *http.Request) {
 		info = "Available"
 	}
 	fmt.Fprintf(w, `<html><head><title>%s</title><meta http-equiv="refresh" content="60"></head><body><p style="font-family:arial;color:%s;font-size:120px">%s</p>Last updated %s</body></html>`, info, color, info, status.lastUpdated.Format(time.RFC1123))
+	remoteIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+
+	log.Printf("ip=%s event=showStatus state=%s\n", remoteIP, info)
 
 }
 
