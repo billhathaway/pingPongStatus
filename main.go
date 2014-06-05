@@ -41,6 +41,7 @@ func (t tableStatus) String() string {
 
 // fetch events forever, updating status
 func fetchEvents(url string) {
+	badLineCount := 0
 	for {
 		response, err := http.Get(url)
 		if err != nil {
@@ -54,6 +55,10 @@ func fetchEvents(url string) {
 		buffed := bufio.NewReader(response.Body)
 		for {
 			line, err := buffed.ReadBytes('\n')
+			if err != nil {
+				log.Printf("event=erro_from_buffered_reader error=%q\n", err.Error())
+				break
+			}
 			switch {
 			// ignore lines starting with colon per spec
 			case bytes.HasPrefix(line, []byte(":")):
@@ -80,10 +85,14 @@ func fetchEvents(url string) {
 					buf.Reset()
 					status.available = event.Data == "free"
 					status.lastUpdated = time.Now()
-					//log.Println(status)
+					log.Println(status)
 				}
 			default:
-				log.Printf("Unknown line received: %s\n", line)
+				log.Printf("event=unknown_line_received line=[%s]\n", line)
+				badLineCount++
+				if badLineCount > 1000 {
+					log.Fatalln("Too many bad lines")
+				}
 				break
 			}
 		}
@@ -101,7 +110,6 @@ func showStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	fmt.Fprintf(w, `<html><head><title>%s</title><meta http-equiv="refresh" content="60"></head><body><p style="font-family:arial;color:%s;font-size:120px">%s</p>Last updated %s</body></html>`, info, color, info, status.lastUpdated.Format(time.RFC1123))
 	remoteIP, _, _ := net.SplitHostPort(r.RemoteAddr)
-
 	log.Printf("ip=%s event=showStatus state=%s\n", remoteIP, info)
 
 }
