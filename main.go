@@ -56,7 +56,7 @@ func fetchEvents(url string) {
 		for {
 			line, err := buffed.ReadBytes('\n')
 			if err != nil {
-				log.Printf("event=erro_from_buffered_reader error=%q\n", err.Error())
+				log.Printf("event=error_from_buffered_reader error=%q\n", err.Error())
 				break
 			}
 			switch {
