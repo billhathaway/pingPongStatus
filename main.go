@@ -42,6 +42,8 @@ func (t tableStatus) String() string {
 // fetch events forever, updating status
 func fetchEvents(url string) {
 	badLineCount := 0
+	var buf bytes.Buffer
+	buffed := &bufio.Reader{}
 	for {
 		response, err := http.Get(url)
 		if err != nil {
@@ -49,10 +51,10 @@ func fetchEvents(url string) {
 			time.Sleep(time.Minute)
 			continue
 		}
-		var buf bytes.Buffer
+		log.Printf("event=api_call status=success %s\n", url)
 		event := sparkEvent{}
 		receivedTableStatus := false
-		buffed := bufio.NewReader(response.Body)
+		buffed = bufio.NewReader(response.Body)
 		for {
 			line, err := buffed.ReadBytes('\n')
 			if err != nil {
@@ -78,15 +80,16 @@ func fetchEvents(url string) {
 					receivedTableStatus = false
 					err = json.Unmarshal(buf.Bytes(), &event)
 					if err != nil {
-						log.Printf("event=unmarshall_json status=error message=%q data=%s\n", err.Error(), buf.String())
+						log.Printf("event=unmarshall_json status=error message=%q data=[%s]\n", err.Error(), buf.String())
 						buf.Reset()
 						continue
 					}
-					buf.Reset()
 					status.available = event.Data == "free"
 					status.lastUpdated = time.Now()
+					badLineCount = 0
 					log.Println(status)
 				}
+				buf.Reset()
 			default:
 				log.Printf("event=unknown_line_received line=[%s]\n", line)
 				badLineCount++
@@ -97,6 +100,7 @@ func fetchEvents(url string) {
 			}
 		}
 		response.Body.Close()
+		time.Sleep(time.Minute)
 	}
 
 }
@@ -115,7 +119,7 @@ func showStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func blackHole(w http.ResponseWriter, r *http.Request) {
-
+	w.WriteHeader(404)
 }
 
 func main() {
