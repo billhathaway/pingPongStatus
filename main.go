@@ -12,7 +12,19 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/ajstarks/svgo"
+)
+
+const (
+	stateUnknown = iota
+	stateAvailable
+	stateBusy
+	maxHistory       = 60
+	graphMinuteWidth = 10
+	graphHeight      = 30
 )
 
 var (
@@ -31,12 +43,29 @@ type sparkEvent struct {
 }
 
 type tableStatus struct {
+	sync.Mutex
+	history     []bool
 	available   bool
 	lastUpdated time.Time
 }
 
 func (t tableStatus) String() string {
 	return fmt.Sprintf("available=%v lastUpdated=%s", t.available, t.lastUpdated.Format(time.RFC3339))
+}
+
+func keepHistory() {
+	status.history = []bool{true, true, false, false, true, false, false, true, true, false, false, false, false, true}
+	t := time.NewTicker(time.Minute)
+	for {
+		<-t.C
+		status.Lock()
+		status.history = append(status.history, status.available)
+		historyLength := len(status.history)
+		if historyLength > maxHistory {
+			status.history = status.history[historyLength-maxHistory:]
+		}
+		status.Unlock()
+	}
 }
 
 // fetch events forever, updating status
@@ -59,6 +88,7 @@ func fetchEvents(url string) {
 			line, err := buffed.ReadBytes('\n')
 			if err != nil {
 				log.Printf("event=error_from_buffered_reader error=%q\n", err.Error())
+				response.Body.Close()
 				break
 			}
 			switch {
@@ -105,6 +135,34 @@ func fetchEvents(url string) {
 
 }
 
+func generateGraph(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "image/svg+xml")
+	s := svg.New(w)
+	status.Lock()
+	defer status.Unlock()
+	historyLength := len(status.history)
+	s.Start(graphMinuteWidth*historyLength, graphHeight)
+	var color string
+	var lineHeight int
+	for index, entry := range status.history {
+		if entry {
+			color = "green"
+		} else {
+			color = "red"
+		}
+		s.Rect(graphMinuteWidth*index, 10, graphMinuteWidth, graphHeight, "fill:"+color)
+		if index%5 == 0 {
+			lineHeight = graphHeight
+		} else {
+			lineHeight = graphHeight / 2
+		}
+		s.Line(graphMinuteWidth*index, 10, graphMinuteWidth*index, lineHeight, "stroke:black")
+
+	}
+	s.End()
+
+}
+
 func showStatus(w http.ResponseWriter, r *http.Request) {
 	info := "Busy"
 	color := "red"
@@ -112,14 +170,10 @@ func showStatus(w http.ResponseWriter, r *http.Request) {
 		color = "green"
 		info = "Available"
 	}
-	fmt.Fprintf(w, `<html><head><title>%s</title><meta http-equiv="refresh" content="60"></head><body><p style="font-family:arial;color:%s;font-size:120px">%s</p>Last updated %s</body></html>`, info, color, info, status.lastUpdated.Format(time.RFC1123))
+	fmt.Fprintf(w, `<html><head><title>%s</title><meta http-equiv="refresh" content="60"></head><body><p style="font-family:arial;color:%s;font-size:120px">%s</p>Last updated %s<p><img src="/graph"></body></html>`, info, color, info, status.lastUpdated.Format(time.RFC1123))
 	remoteIP, _, _ := net.SplitHostPort(r.RemoteAddr)
 	log.Printf("ip=%s event=showStatus state=%s\n", remoteIP, info)
 
-}
-
-func blackHole(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(404)
 }
 
 func main() {
@@ -137,8 +191,10 @@ func main() {
 
 	}
 	go fetchEvents(url)
+	go keepHistory()
 	http.HandleFunc("/", showStatus)
-	http.HandleFunc("/favicon.ico", blackHole)
+	http.HandleFunc("/graph", generateGraph)
+	http.Handle("/favicon.ico", http.NotFoundHandler())
 	err := http.ListenAndServe(":"+port, nil)
 	log.Fatal(err)
 }
