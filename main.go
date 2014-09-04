@@ -2,8 +2,6 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -14,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/billhathaway/serverSentEvents"
 
 	"github.com/ajstarks/svgo"
 )
@@ -44,7 +44,7 @@ type sparkEvent struct {
 
 type tableStatus struct {
 	sync.Mutex
-	history     []bool
+	history     []int
 	available   bool
 	lastUpdated time.Time
 }
@@ -54,12 +54,18 @@ func (t tableStatus) String() string {
 }
 
 func keepHistory() {
-	status.history = []bool{true, true, false, false, true, false, false, true, true, false, false, false, false, true}
 	t := time.NewTicker(time.Minute)
 	for {
 		<-t.C
 		status.Lock()
-		status.history = append(status.history, status.available)
+		switch {
+		case status.lastUpdated.Before(time.Now().Add(-1 * time.Minute)):
+			status.history = append(status.history, stateUnknown)
+		case status.available:
+			status.history = append(status.history, stateAvailable)
+		case !status.available:
+			status.history = append(status.history, stateBusy)
+		}
 		historyLength := len(status.history)
 		if historyLength > maxHistory {
 			status.history = status.history[historyLength-maxHistory:]
@@ -70,69 +76,27 @@ func keepHistory() {
 
 // fetch events forever, updating status
 func fetchEvents(url string) {
-	badLineCount := 0
-	var buf bytes.Buffer
-	buffed := &bufio.Reader{}
 	for {
-		response, err := http.Get(url)
+		listener, err := sse.Listen(url)
 		if err != nil {
-			log.Printf("event=api_call status=error message=%q\n", err.Error())
 			time.Sleep(time.Minute)
 			continue
 		}
-		log.Printf("event=api_call status=success %s\n", url)
-		event := sparkEvent{}
-		receivedTableStatus := false
-		buffed = bufio.NewReader(response.Body)
-		for {
-			line, err := buffed.ReadBytes('\n')
+		for event := range listener.C {
+			se := sparkEvent{}
+			err := json.Unmarshal([]byte(event.Data), &se)
 			if err != nil {
-				log.Printf("event=error_from_buffered_reader error=%q\n", err.Error())
-				response.Body.Close()
-				break
+				log.Print("Unmarshall error", err)
+				continue
 			}
-			switch {
-			// ignore lines starting with colon per spec
-			case bytes.HasPrefix(line, []byte(":")):
-			// skip per spec
-			case bytes.HasPrefix(line, []byte("event:")):
-				if string(line[7:]) == "tableStatus\n" {
-					receivedTableStatus = true
-				} else {
-					log.Printf("Skipping event %s", line)
-				}
-			case bytes.HasPrefix(line, []byte("data:")):
-				if receivedTableStatus {
-					buf.Write(line[6:])
-				}
-			case len(line) == 1:
-				if receivedTableStatus {
-					receivedTableStatus = false
-					err = json.Unmarshal(buf.Bytes(), &event)
-					if err != nil {
-						log.Printf("event=unmarshall_json status=error message=%q data=[%s]\n", err.Error(), buf.String())
-						buf.Reset()
-						continue
-					}
-					status.available = event.Data == "free"
-					status.lastUpdated = time.Now()
-					badLineCount = 0
-					log.Println(status)
-				}
-				buf.Reset()
-			default:
-				log.Printf("event=unknown_line_received line=[%s]\n", line)
-				badLineCount++
-				if badLineCount > 1000 {
-					log.Fatalln("Too many bad lines")
-				}
-				break
-			}
+			status.Lock()
+			status.available = se.Data != "busy"
+			status.lastUpdated = time.Now()
+			status.Unlock()
+			log.Println("received event", se)
 		}
-		response.Body.Close()
-		time.Sleep(time.Minute)
+		log.Println("restarting connection")
 	}
-
 }
 
 func generateGraph(w http.ResponseWriter, r *http.Request) {
@@ -145,9 +109,12 @@ func generateGraph(w http.ResponseWriter, r *http.Request) {
 	var color string
 	var lineHeight int
 	for index, entry := range status.history {
-		if entry {
+		switch entry {
+		case stateUnknown:
+			color = "blue"
+		case stateAvailable:
 			color = "green"
-		} else {
+		case stateBusy:
 			color = "red"
 		}
 		s.Rect(graphMinuteWidth*index, 10, graphMinuteWidth, graphHeight, "fill:"+color)
@@ -166,12 +133,19 @@ func generateGraph(w http.ResponseWriter, r *http.Request) {
 func showStatus(w http.ResponseWriter, r *http.Request) {
 	info := "Busy"
 	color := "red"
+	remoteIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+
+	if status.lastUpdated.Before(time.Now().Add(-3 * time.Minute)) {
+		color = "blue"
+		info = "Unknown"
+		fmt.Fprintf(w, `<html><head><title>%s</title><meta http-equiv="refresh" content="60"></head><body><p style="font-family:arial;color:%s;font-size:120px">%s</p>Sensor data old - last updated %s<p><img src="/graph"></body></html>`, info, color, info, status.lastUpdated.Format(time.RFC1123))
+		return
+	}
 	if status.available {
 		color = "green"
 		info = "Available"
 	}
-	fmt.Fprintf(w, `<html><head><title>%s</title><meta http-equiv="refresh" content="60"></head><body><p style="font-family:arial;color:%s;font-size:120px">%s</p>Last updated %s<p><img src="/graph"></body></html>`, info, color, info, status.lastUpdated.Format(time.RFC1123))
-	remoteIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+	fmt.Fprintf(w, `<html><head><title>%s</title><meta http-equiv="refresh" content="60"></head><body><p style="font-family:arial;color:%s;font-size:120px">%s</p><p>Last updated %s</p><p>%d minutes of history</p><img src="/graph"></body></html>`, info, color, info, status.lastUpdated.Format(time.RFC1123), len(status.history))
 	log.Printf("ip=%s event=showStatus state=%s\n", remoteIP, info)
 
 }
